@@ -1,26 +1,22 @@
 package generator
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"os"
+	"os/exec"
 	"path"
+	"runtime"
 	"strings"
 
-	"bytes"
-
-	"os/exec"
-
-	"os"
-
-	"runtime"
-
-	"errors"
-
+	"github.com/GrantZheng/kit/fs"
+	grpcTemplate "github.com/GrantZheng/kit/generator/template/grpc"
+	"github.com/GrantZheng/kit/parser"
+	"github.com/GrantZheng/kit/utils"
 	"github.com/dave/jennifer/jen"
 	"github.com/emicklei/proto"
 	"github.com/emicklei/proto-contrib/pkg/protofmt"
-	"github.com/kujtimiihoxha/kit/fs"
-	"github.com/kujtimiihoxha/kit/parser"
-	"github.com/kujtimiihoxha/kit/utils"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
 )
@@ -707,8 +703,14 @@ func (g *generateGRPCTransportProto) Generate() (err error) {
 			&proto.Package{
 				Name: "pb",
 			},
+			&proto.Option{
+				Comment:  nil,
+				Name:     "go_package",
+				Constant: proto.Literal{Source: fmt.Sprintf(`"%s"`, g.destPath)},
+			},
 			svc,
 		)
+
 	} else {
 		s := g.getService()
 		if s == nil {
@@ -729,8 +731,14 @@ func (g *generateGRPCTransportProto) Generate() (err error) {
 		g.pbFilePath = path.Join(viper.GetString("gk_folder"), g.pbFilePath)
 	}
 	if !viper.GetBool("gk_testing") {
-		cmd := exec.Command("protoc", g.pbFilePath, "--go_out=plugins=grpc:.")
+		cmd := exec.Command("protoc",
+			"--go_out=.", "--go_opt=paths=source_relative",
+			"--go-grpc_out=.", "--go-grpc_opt=paths=source_relative",
+			g.pbFilePath)
 		cmd.Stdout = os.Stdout
+		// In case there is an error in protoc, user can receive error, otherwise,
+		// they can only receive "ERRO[0000] exit status 1". see issue #18
+		cmd.Stderr = os.Stderr
 		err = cmd.Run()
 		if err != nil {
 			return err
@@ -745,61 +753,20 @@ func (g *generateGRPCTransportProto) Generate() (err error) {
 	if runtime.GOOS == "windows" {
 		return g.fs.WriteFile(
 			g.compileFilePath,
-			fmt.Sprintf(`:: Install proto3.
-:: https://github.com/google/protobuf/releases
-:: Update protoc Go bindings via
-::  go get -u github.com/golang/protobuf/proto
-::  go get -u github.com/golang/protobuf/protoc-gen-go
-::
-:: See also
-::  https://github.com/grpc/grpc-go/tree/master/examples
-
-protoc %s.proto --go_out=plugins=grpc:.`, g.name),
+			grpcTemplate.WindowsScriptText(g.name),
 			false,
 		)
 	}
 	if runtime.GOOS == "darwin" {
 		return g.fs.WriteFile(
 			g.compileFilePath,
-			fmt.Sprintf(`#!/usr/bin/env sh
-
-# Install proto3 from source macOS only.
-#  brew install autoconf automake libtool
-#  git clone https://github.com/google/protobuf
-#  ./autogen.sh ; ./configure ; make ; make install
-#
-# Update protoc Go bindings via
-#  go get -u github.com/golang/protobuf/{proto,protoc-gen-go}
-#
-# See also
-#  https://github.com/grpc/grpc-go/tree/master/examples
-
-protoc %s.proto --go_out=plugins=grpc:.`, g.name),
+			grpcTemplate.DarwinScriptText(g.name),
 			false,
 		)
 	}
 	return g.fs.WriteFile(
 		g.compileFilePath,
-		fmt.Sprintf(`#!/usr/bin/env sh
-
-# Install proto3
-# sudo apt-get install -y git autoconf automake libtool curl make g++ unzip
-# git clone https://github.com/google/protobuf.git
-# cd protobuf/
-# ./autogen.sh
-# ./configure
-# make
-# make check
-# sudo make install
-# sudo ldconfig # refresh shared library cache.
-#
-# Update protoc Go bindings via
-#  go get -u github.com/golang/protobuf/{proto,protoc-gen-go}
-#
-# See also
-#  https://github.com/grpc/grpc-go/tree/master/examples
-
-protoc %s.proto --go_out=plugins=grpc:.`, g.name),
+		grpcTemplate.ScriptText(g.name),
 		false,
 	)
 }
@@ -940,6 +907,7 @@ func (g *generateGRPCTransportBase) Generate() (err error) {
 			}
 			fields = append(fields, jen.Id(n).Qual("github.com/go-kit/kit/transport/grpc", "Handler"))
 		}
+		fields = append(fields, jen.Id("").Qual(pbImport, "Unimplemented"+utils.ToCamelCase(g.name)+"Server"))
 	} else {
 		for _, m := range g.serviceInterface.Methods {
 			n := utils.ToLowerFirstCamelCase(m.Name)
@@ -1137,7 +1105,7 @@ func (g *generateGRPCTransport) Generate() (err error) {
 				n,
 				jen.Id(stp).Id("*grpcServer"),
 				[]jen.Code{
-					jen.Id("ctx").Qual("golang.org/x/net/context", "Context"),
+					jen.Id("ctx").Qual("context", "Context"),
 					jen.Id("req").Id("*").Qual(pbImport, n+"Request"),
 				},
 				[]jen.Code{
